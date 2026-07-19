@@ -1,1 +1,1 @@
-# citacka-ortofoto.
+# citacka-ortofoto
