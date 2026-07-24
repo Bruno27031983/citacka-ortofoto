@@ -1,0 +1,31 @@
+name: Obnovit predchadzajuci index
+
+on:
+  push:
+    paths:
+      - '.github/workflows/restore-previous-index.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  restore:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Obnov predchadzajuci index.html
+        run: |
+          git show d135d0512003bb9d1de6a2e35ea1b93e3ad150a3 > index.html
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add index.html
+          if git diff --cached --quiet; then
+            echo "Subor uz je v predchadzajucej verzii."
+          else
+            git commit -m "Obnovit predchadzajucu verziu index.html"
+            git push
+          fi
