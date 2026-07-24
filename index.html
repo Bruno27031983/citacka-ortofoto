@@ -582,6 +582,8 @@ let ortoMode=false, ortoImg=null, ortoTimer=null, ortoLastKey='';
 let importedPts=[];
 let gpsPts=[];
 let liveLocation=null, locationWatchId=null, locationFirstFix=true;
+let locationSamples=[], locationStartedAt=0;
+const LOCATION_WINDOW_MS=45000, LOCATION_MAX_SAMPLES=80, LOCATION_MAX_ACCURACY=60;
 let measureMode=false, measurePoints=[];
 
 // ===== DXF PARSER =====
@@ -1241,10 +1243,58 @@ function locationErrorMessage(error) {
   return error.message || 'Polohu sa nepodarilo získať.';
 }
 
+function median(values) {
+  if (!values.length) return 0;
+  const a=[...values].sort((x,y)=>x-y);
+  const m=Math.floor(a.length/2);
+  return a.length%2 ? a[m] : (a[m-1]+a[m])/2;
+}
+
+function buildPreciseLocation(samples) {
+  if (!samples.length) return null;
+
+  // Robustný stred: najprv medián, potom odstránenie odľahlých meraní.
+  const mx=median(samples.map(s=>s.x));
+  const my=median(samples.map(s=>s.y));
+  const distances=samples.map(s=>Math.hypot(s.x-mx,s.y-my));
+  const medianDistance=median(distances);
+  const medianAccuracy=median(samples.map(s=>Math.max(s.accuracy||50,1)));
+  const limit=Math.max(3, medianDistance*3, Math.min(20,medianAccuracy*1.5));
+  let inliers=samples.filter((s,i)=>distances[i]<=limit);
+  if (inliers.length<Math.min(3,samples.length)) inliers=samples;
+
+  // Vážený priemer: lepšia hlásená presnosť má vyššiu váhu.
+  let sumW=0, x=0, y=0, lat=0, lon=0;
+  for (const s of inliers) {
+    const effectiveAccuracy=Math.max(1.5,Math.min(50,s.accuracy||50));
+    const w=1/(effectiveAccuracy*effectiveAccuracy);
+    sumW+=w; x+=s.x*w; y+=s.y*w; lat+=s.lat*w; lon+=s.lon*w;
+  }
+  x/=sumW; y/=sumW; lat/=sumW; lon/=sumW;
+
+  const spread=Math.sqrt(inliers.reduce((acc,s)=>acc+Math.pow(Math.hypot(s.x-x,s.y-y),2),0)/inliers.length);
+  const bestAccuracy=Math.min(...inliers.map(s=>s.accuracy||99));
+  const conservativeAccuracy=Math.max(bestAccuracy,spread);
+  const latest=inliers[inliers.length-1];
+  return {
+    id:'moja-poloha',x,y,lat,lon,
+    accuracy:conservativeAccuracy,
+    deviceAccuracy:bestAccuracy,
+    stability:spread,
+    sampleCount:inliers.length,
+    rejectedCount:samples.length-inliers.length,
+    heading:latest.heading,
+    speed:latest.speed,
+    timestamp:latest.timestamp
+  };
+}
+
 function stopLiveLocation(showMessage=true) {
   if (locationWatchId!==null && navigator.geolocation) navigator.geolocation.clearWatch(locationWatchId);
   locationWatchId=null;
   locationFirstFix=true;
+  locationSamples=[];
+  locationStartedAt=0;
   const btn=document.getElementById('btnLocation');
   btn.classList.remove('active');
   btn.textContent='Moja poloha OFF';
@@ -1265,29 +1315,49 @@ function startLiveLocation() {
   btn.classList.add('active');
   btn.textContent='Moja poloha ON';
   locationFirstFix=true;
-  updateLocationStatus('Hľadám polohu telefónu…');
+  locationSamples=[];
+  locationStartedAt=Date.now();
+  updateLocationStatus('Hľadám čo najpresnejšiu polohu… zostaň chvíľu na mieste.');
 
   locationWatchId=navigator.geolocation.watchPosition(position=>{
     try {
+      const accuracy=Number.isFinite(position.coords.accuracy)?position.coords.accuracy:99;
       const source={id:'moja-poloha',lat:position.coords.latitude,lon:position.coords.longitude};
       const p=gpsToJtsk(source);
-      liveLocation={
-        ...p,
-        accuracy:Number.isFinite(position.coords.accuracy)?position.coords.accuracy:0,
+      const sample={
+        ...p, accuracy,
         heading:Number.isFinite(position.coords.heading)?position.coords.heading:null,
         speed:Number.isFinite(position.coords.speed)?position.coords.speed:null,
-        timestamp:position.timestamp
+        timestamp:position.timestamp || Date.now()
       };
+
+      // Veľmi zlé merania nezarátame. Staré merania priebežne zahadzujeme.
+      const now=Date.now();
+      if (accuracy<=LOCATION_MAX_ACCURACY) locationSamples.push(sample);
+      locationSamples=locationSamples
+        .filter(s=>now-s.timestamp<=LOCATION_WINDOW_MS)
+        .slice(-LOCATION_MAX_SAMPLES);
+
+      if (!locationSamples.length) {
+        updateLocationStatus(`Slabý GPS signál ±${Math.round(accuracy)} m. Prejdi na otvorené miesto.`,'error');
+        return;
+      }
+
+      liveLocation=buildPreciseLocation(locationSamples);
       showMapWorkspace();
       resizeCanvas();
       if (locationFirstFix) {
-        bounds={minX:p.x-25,maxX:p.x+25,minY:p.y-25,maxY:p.y+25};
-        focusWorldPoint(p.x,p.y,Math.max(viewScale,8));
+        bounds={minX:liveLocation.x-25,maxX:liveLocation.x+25,minY:liveLocation.y-25,maxY:liveLocation.y+25};
+        focusWorldPoint(liveLocation.x,liveLocation.y,Math.max(viewScale,8));
         locationFirstFix=false;
         if (isJtskMetersDrawing()) setOrtoEnabled(true);
       }
-      const acc=liveLocation.accuracy ? ` ±${Math.round(liveLocation.accuracy)} m` : '';
-      updateLocationStatus(`Moja poloha${acc}`,'success');
+
+      const elapsed=Math.round((now-locationStartedAt)/1000);
+      const acc=Math.round(liveLocation.deviceAccuracy||liveLocation.accuracy||0);
+      const stability=Math.max(0,liveLocation.stability||0);
+      const quality=acc<=3 && stability<=1.5 ? 'výborná' : acc<=6 && stability<=3 ? 'dobrá' : acc<=12 ? 'stredná' : 'slabšia';
+      updateLocationStatus(`Poloha: ${quality} | GPS ±${acc} m | stabilita ±${stability.toFixed(1)} m | ${liveLocation.sampleCount} meraní | ${elapsed} s`,'success');
       draw();
     } catch(err) {
       stopLiveLocation(false);
@@ -1298,8 +1368,8 @@ function startLiveLocation() {
     updateLocationStatus(locationErrorMessage(error),'error');
   },{
     enableHighAccuracy:true,
-    maximumAge:1000,
-    timeout:15000
+    maximumAge:0,
+    timeout:30000
   });
 }
 
@@ -1561,7 +1631,7 @@ function draw() {
     ctx.fillStyle='#ffffff';
     ctx.beginPath(); ctx.arc(sx,sy,2.5,0,Math.PI*2); ctx.fill();
     ctx.font='bold 12px Arial, Helvetica, sans-serif';
-    const label=`Moja poloha${liveLocation.accuracy ? ` ±${Math.round(liveLocation.accuracy)} m` : ''}`;
+    const label=`Moja poloha${liveLocation.deviceAccuracy ? ` GPS ±${Math.round(liveLocation.deviceAccuracy)} m` : ''}${liveLocation.sampleCount ? ` • ${liveLocation.sampleCount}×` : ''}`;
     const lw=ctx.measureText(label).width;
     ctx.fillStyle='rgba(255,255,255,0.92)';
     ctx.beginPath(); roundRectPath(ctx,sx+12,sy-28,lw+10,18,5); ctx.fill();
