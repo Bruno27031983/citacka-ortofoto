@@ -52,6 +52,33 @@ body {
 .location-status.visible { display: block; }
 .location-status.error { color: #b45309; border-color: #b45309; }
 .location-status.success { color: #0f766e; border-color: #0f766e; }
+.navigation-panel {
+  position: absolute; left: 50%; top: 48px; transform: translateX(-50%);
+  z-index: 36; display: none; align-items: center; gap: 12px;
+  min-width: 260px; max-width: calc(100vw - 24px);
+  padding: 10px 12px; border: 1px solid var(--border); border-radius: 12px;
+  background: rgba(255,255,255,0.96); color: var(--text);
+  box-shadow: 0 8px 24px rgba(15,23,42,0.20); backdrop-filter: blur(5px);
+}
+.navigation-panel.visible { display: flex; }
+.navigation-panel.arrived { border-color: #0f766e; box-shadow: 0 8px 24px rgba(15,118,110,0.24); }
+.nav-arrow {
+  width: 52px; height: 52px; flex: 0 0 52px; display: grid; place-items: center;
+  color: #dc2626; font-size: 44px; font-weight: 900; line-height: 1;
+  transform-origin: 50% 50%; transition: transform 0.25s ease;
+  text-shadow: 0 2px 5px rgba(0,0,0,0.16);
+}
+.navigation-panel.arrived .nav-arrow { color: #0f766e; }
+.nav-details { min-width: 0; flex: 1; }
+.nav-distance { font-size: 21px; font-weight: 800; line-height: 1.1; white-space: nowrap; }
+.nav-direction { margin-top: 3px; font-size: 12px; font-weight: 700; }
+.nav-accuracy { margin-top: 2px; color: var(--muted); font-size: 10px; line-height: 1.3; }
+.nav-stop {
+  width: 32px; height: 32px; flex: 0 0 32px; border: 1px solid var(--border);
+  border-radius: 8px; background: transparent; color: var(--text); cursor: pointer;
+  font-size: 20px; line-height: 1;
+}
+.nav-stop:hover { border-color: #dc2626; color: #dc2626; }
 .layers-popover {
   position: absolute;
   top: calc(100% + 8px);
@@ -436,6 +463,9 @@ canvas { display: block; cursor: crosshair; position: absolute; top: 0; left: 0;
   .main:not(.sidebar-hidden) .panel-toggle { bottom: calc(58dvh + 12px); }
   .canvas-toolbar { top: 58px; right: 10px; }
   .tool-btn { width: 44px; height: 44px; font-size: 18px; }
+  .navigation-panel { top: 58px; min-width: 240px; padding: 8px 10px; }
+  .nav-arrow { width: 44px; height: 44px; flex-basis: 44px; font-size: 38px; }
+  .nav-distance { font-size: 18px; }
   .canvas-hint {
     left: 10px;
     right: 64px;
@@ -478,6 +508,7 @@ canvas { display: block; cursor: crosshair; position: absolute; top: 0; left: 0;
     <button class="btn btn-secondary" id="btnTheme">Svetly rezim</button>
     <button class="btn btn-secondary" id="btnOrto" disabled>Ortofoto OFF</button>
     <button class="btn btn-secondary" id="btnLocation">Moja poloha OFF</button>
+    <button class="btn btn-secondary" id="btnNavigate" disabled>Navigovať</button>
     <button class="btn btn-secondary" id="btnLineSnap" disabled>Snap linie OFF</button>
     <button class="btn btn-secondary" id="btnMeasure" disabled>Meranie OFF</button>
     <div class="layer-menu">
@@ -545,6 +576,15 @@ canvas { display: block; cursor: crosshair; position: absolute; top: 0; left: 0;
   <div class="canvas-area" id="canvasArea">
     <button class="panel-toggle" id="btnPanelToggle" title="Skryť/zobraziť panel">☰</button>
     <div class="location-status" id="locationStatus"></div>
+    <div class="navigation-panel" id="navigationPanel">
+      <div class="nav-arrow" id="navArrow">↑</div>
+      <div class="nav-details">
+        <div class="nav-distance" id="navDistance">Čakám na GPS…</div>
+        <div class="nav-direction" id="navDirection">Navigácia na vybraný bod</div>
+        <div class="nav-accuracy" id="navAccuracy"></div>
+      </div>
+      <button class="nav-stop" id="btnStopNavigation" title="Ukončiť navigáciu">×</button>
+    </div>
     <div class="empty-state" id="emptyState">
       <div class="empty-icon">🗺</div>
       <div>Nahraj DXF súbor pre zobrazenie výkresu</div>
@@ -582,6 +622,8 @@ let ortoMode=false, ortoImg=null, ortoTimer=null, ortoLastKey='';
 let importedPts=[];
 let gpsPts=[];
 let liveLocation=null, locationWatchId=null, locationFirstFix=true;
+let navigationTarget=null, navigationNeedsFit=false, navigationNear=false;
+let deviceHeading=null, orientationTracking=false;
 let measureMode=false, measurePoints=[];
 
 // ===== DXF PARSER =====
@@ -1249,6 +1291,7 @@ function stopLiveLocation(showMessage=true) {
   btn.classList.remove('active');
   btn.textContent='Moja poloha OFF';
   if (showMessage) updateLocationStatus('Živá poloha je vypnutá.');
+  updateNavigationUI();
   draw();
 }
 
@@ -1288,6 +1331,8 @@ function startLiveLocation() {
       }
       const acc=liveLocation.accuracy ? ` ±${Math.round(liveLocation.accuracy)} m` : '';
       updateLocationStatus(`Moja poloha${acc}`,'success');
+      if (navigationTarget && navigationNeedsFit) { fitNavigationView(); navigationNeedsFit=false; }
+      updateNavigationUI();
       draw();
     } catch(err) {
       stopLiveLocation(false);
@@ -1306,6 +1351,181 @@ function startLiveLocation() {
 function toggleLiveLocation() {
   if (locationWatchId!==null) stopLiveLocation();
   else startLiveLocation();
+}
+
+// ===== NAVIGÁCIA NA BOD V S-JTSK =====
+function normalizeDegrees(value) {
+  return ((value % 360) + 360) % 360;
+}
+
+function isJtskPoint(point) {
+  return !!point && point.x>-960000 && point.x<-150000 && point.y>-1360000 && point.y<-900000;
+}
+
+function jtskToWgs84Point(point) {
+  if (typeof proj4!=='function') return null;
+  proj4.defs('EPSG:5514',GPS_JTSK_DEF);
+  // Aplikácia používa x=Y a y=X. Proj4 očakáva poradie X,Y systému EPSG:5514.
+  const result=proj4('EPSG:5514','EPSG:4326',[point.y,point.x]);
+  if (!result || !Number.isFinite(result[0]) || !Number.isFinite(result[1])) return null;
+  return {lon:result[0],lat:result[1]};
+}
+
+function bearingDegrees(lat1,lon1,lat2,lon2) {
+  const p1=lat1*Math.PI/180, p2=lat2*Math.PI/180;
+  const dl=(lon2-lon1)*Math.PI/180;
+  const y=Math.sin(dl)*Math.cos(p2);
+  const x=Math.cos(p1)*Math.sin(p2)-Math.sin(p1)*Math.cos(p2)*Math.cos(dl);
+  return normalizeDegrees(Math.atan2(y,x)*180/Math.PI);
+}
+
+function cardinalDirection(bearing) {
+  const names=['S','SV','V','JV','J','JZ','Z','SZ'];
+  return names[Math.round(normalizeDegrees(bearing)/45)%8];
+}
+
+function navigationDistance() {
+  if (!navigationTarget || !liveLocation) return null;
+  return Math.hypot(navigationTarget.x-liveLocation.x,navigationTarget.y-liveLocation.y);
+}
+
+function navigationBearing() {
+  if (!navigationTarget || !liveLocation) return null;
+  const target=jtskToWgs84Point(navigationTarget);
+  if (target && Number.isFinite(liveLocation.lat) && Number.isFinite(liveLocation.lon)) {
+    return bearingDegrees(liveLocation.lat,liveLocation.lon,target.lat,target.lon);
+  }
+  // Záložný smer podľa orientácie výkresu, keď transformačná knižnica nie je dostupná.
+  return normalizeDegrees(Math.atan2(navigationTarget.x-liveLocation.x,navigationTarget.y-liveLocation.y)*180/Math.PI);
+}
+
+function handleDeviceOrientation(event) {
+  let heading=null;
+  if (Number.isFinite(event.webkitCompassHeading)) heading=event.webkitCompassHeading;
+  else if (event.absolute && Number.isFinite(event.alpha)) heading=360-event.alpha;
+  if (Number.isFinite(heading)) {
+    deviceHeading=normalizeDegrees(heading);
+    updateNavigationUI();
+  }
+}
+
+function enableOrientationTracking() {
+  if (orientationTracking) return;
+  orientationTracking=true;
+  window.addEventListener('deviceorientationabsolute',handleDeviceOrientation,true);
+  window.addEventListener('deviceorientation',handleDeviceOrientation,true);
+}
+
+function requestOrientationTracking() {
+  if (typeof DeviceOrientationEvent!=='undefined' && typeof DeviceOrientationEvent.requestPermission==='function') {
+    DeviceOrientationEvent.requestPermission().then(result=>{
+      if (result==='granted') enableOrientationTracking();
+    }).catch(()=>{});
+  } else {
+    enableOrientationTracking();
+  }
+}
+
+function fitNavigationView() {
+  if (!navigationTarget || !liveLocation) return;
+  const canvas=document.getElementById('mainCanvas');
+  const pad=Math.min(90,canvas.width/4,canvas.height/4);
+  const dx=Math.max(Math.abs(navigationTarget.x-liveLocation.x),8);
+  const dy=Math.max(Math.abs(navigationTarget.y-liveLocation.y),8);
+  const usableW=Math.max(canvas.width-pad*2,1);
+  const usableH=Math.max(canvas.height-pad*2,1);
+  viewCenterX=(navigationTarget.x+liveLocation.x)/2;
+  viewCenterY=(navigationTarget.y+liveLocation.y)/2;
+  viewScale=Math.max(0.000001,Math.min(usableW/dx,usableH/dy,80));
+  syncViewOffset();
+}
+
+function startNavigationToClickedPoint() {
+  if (!clickedCoords) return;
+  if (!isJtskPoint(clickedCoords)) {
+    alert('Navigácia funguje iba na body výkresu v súradniciach S-JTSK.');
+    return;
+  }
+  navigationTarget={
+    x:clickedCoords.x,
+    y:clickedCoords.y,
+    z:clickedCoords.z||0,
+    label:clickedCoords.gpsPointId || clickedCoords.importedPointId || clickedCoords.pointId || 'vybraný bod'
+  };
+  navigationNeedsFit=true;
+  navigationNear=false;
+  requestOrientationTracking();
+  document.getElementById('navigationPanel').classList.add('visible');
+  document.getElementById('btnNavigate').classList.add('active');
+  document.getElementById('btnNavigate').textContent='Zmeniť cieľ';
+  if (locationWatchId===null) startLiveLocation();
+  else if (liveLocation) { fitNavigationView(); navigationNeedsFit=false; }
+  updateNavigationUI();
+  draw();
+}
+
+function stopNavigation() {
+  navigationTarget=null;
+  navigationNeedsFit=false;
+  navigationNear=false;
+  const panel=document.getElementById('navigationPanel');
+  panel.classList.remove('visible','arrived');
+  const btn=document.getElementById('btnNavigate');
+  btn.classList.remove('active');
+  btn.textContent='Navigovať';
+  btn.disabled=!clickedCoords;
+  draw();
+}
+
+function updateNavigationButton() {
+  const btn=document.getElementById('btnNavigate');
+  if (!btn) return;
+  btn.disabled=!clickedCoords;
+  if (!navigationTarget) btn.textContent='Navigovať';
+}
+
+function updateNavigationUI() {
+  const panel=document.getElementById('navigationPanel');
+  if (!panel || !navigationTarget) return;
+  panel.classList.add('visible');
+  const distance=navigationDistance();
+  const accuracy=liveLocation?.accuracy || 0;
+  const distanceEl=document.getElementById('navDistance');
+  const directionEl=document.getElementById('navDirection');
+  const accuracyEl=document.getElementById('navAccuracy');
+  const arrow=document.getElementById('navArrow');
+
+  if (!liveLocation || locationWatchId===null || !Number.isFinite(distance)) {
+    distanceEl.textContent='Čakám na GPS…';
+    directionEl.textContent=locationWatchId===null ? 'Zapni polohu telefónu' : 'Hľadám tvoju polohu';
+    accuracyEl.textContent=`Cieľ Y ${navigationTarget.x.toFixed(3)}  X ${navigationTarget.y.toFixed(3)}`;
+    arrow.style.transform='rotate(0deg)';
+    panel.classList.remove('arrived');
+    return;
+  }
+
+  const bearing=navigationBearing();
+  const relativeBearing=Number.isFinite(bearing)
+    ? normalizeDegrees(bearing-(Number.isFinite(deviceHeading)?deviceHeading:0))
+    : 0;
+  arrow.style.transform=`rotate(${relativeBearing.toFixed(1)}deg)`;
+  distanceEl.textContent=distance<100 ? `${distance.toFixed(1)} m` : `${Math.round(distance)} m`;
+  const inAccuracyCircle=accuracy>0 && distance<=accuracy;
+  const arrived=distance<=2 || inAccuracyCircle;
+  panel.classList.toggle('arrived',arrived);
+
+  if (distance<=2) directionEl.textContent='Približne pri cieli';
+  else if (inAccuracyCircle) directionEl.textContent='Cieľ je v kruhu presnosti GPS';
+  else if (Number.isFinite(bearing)) {
+    const mode=Number.isFinite(deviceHeading) ? 'šípka podľa telefónu' : 'šípka od severu';
+    directionEl.textContent=`Smer ${cardinalDirection(bearing)} · ${Math.round(bearing)}° · ${mode}`;
+  } else directionEl.textContent='Smer k cieľu';
+
+  accuracyEl.textContent=`GPS ${accuracy ? `±${Math.round(accuracy)} m` : 'bez odhadu'} · cieľ Y ${navigationTarget.x.toFixed(3)} X ${navigationTarget.y.toFixed(3)}`;
+  if (arrived && !navigationNear) {
+    navigationNear=true;
+    if (navigator.vibrate) navigator.vibrate([180,80,180]);
+  } else if (!arrived) navigationNear=false;
 }
 
 // ===== IMPORT BODOV (cislo Y X / X Y) =====
@@ -1570,6 +1790,36 @@ function draw() {
     ctx.restore();
   }
 
+  // navigačný cieľ a spojovacia čiara
+  if (navigationTarget) {
+    const target=toScreen(navigationTarget.x,navigationTarget.y);
+    ctx.save();
+    if (liveLocation) {
+      const current=toScreen(liveLocation.x,liveLocation.y);
+      ctx.strokeStyle='rgba(220,38,38,0.82)';
+      ctx.lineWidth=3;
+      ctx.setLineDash([10,7]);
+      ctx.beginPath(); ctx.moveTo(current.sx,current.sy); ctx.lineTo(target.sx,target.sy); ctx.stroke();
+      ctx.setLineDash([]);
+    }
+    ctx.strokeStyle='#dc2626';
+    ctx.fillStyle='rgba(220,38,38,0.18)';
+    ctx.lineWidth=3;
+    ctx.beginPath(); ctx.arc(target.sx,target.sy,15,0,Math.PI*2); ctx.fill(); ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(target.sx-22,target.sy); ctx.lineTo(target.sx+22,target.sy);
+    ctx.moveTo(target.sx,target.sy-22); ctx.lineTo(target.sx,target.sy+22);
+    ctx.stroke();
+    ctx.font='bold 12px Arial, Helvetica, sans-serif';
+    const targetLabel='CIEĽ';
+    const targetWidth=ctx.measureText(targetLabel).width;
+    ctx.fillStyle='rgba(255,255,255,0.94)';
+    ctx.beginPath(); roundRectPath(ctx,target.sx+18,target.sy-28,targetWidth+12,19,5); ctx.fill();
+    ctx.fillStyle='#dc2626';
+    ctx.fillText(targetLabel,target.sx+24,target.sy-14);
+    ctx.restore();
+  }
+
   // meranie vzdialenosti
   if (measurePoints.length) {
     const a=toScreen(measurePoints[0].x,measurePoints[0].y);
@@ -1750,7 +2000,7 @@ function initEvents() {
     if (measureMode) addMeasurePoint(clickedCoords);
     else if (recordMode) addRecordedCoord(clickedCoords);
     setCursorWorld(clickedCoords.x,clickedCoords.y);
-    updateClickInfo(); draw();
+    updateClickInfo(); updateNavigationButton(); draw();
   });
 
   canvas.addEventListener('dblclick', e => {
@@ -1785,6 +2035,8 @@ function initEvents() {
     draw();
   });
   document.getElementById('btnLocation').addEventListener('click',toggleLiveLocation);
+  document.getElementById('btnNavigate').addEventListener('click',startNavigationToClickedPoint);
+  document.getElementById('btnStopNavigation').addEventListener('click',stopNavigation);
   document.getElementById('btnImportPts').addEventListener('click',()=>{
     document.getElementById('ptsInput').click();
   });
@@ -2384,14 +2636,16 @@ function updateMeasureUI() {
 
 function updateClickInfo() {
   const el=document.getElementById('clickInfo');
-  if (!clickedCoords) { el.innerHTML='<div class="ci-empty">Klikni do výkresu pre súradnice</div>'; return; }
+  if (!clickedCoords) { el.innerHTML='<div class="ci-empty">Klikni do výkresu pre súradnice</div>'; updateNavigationButton(); return; }
   const c=clickedCoords;
   const snapName = c.gpsPointId ? `GPS BOD ${c.gpsPointId}` : (c.importedPointId ? `NAČÍTANÝ BOD ${c.importedPointId}` : (c.pointId ? `POINT #${c.pointId}` : (c.circleId ? `CIRCLE CENTER #${c.circleId}` : (c.polylineId ? `POLYLINE CENTER #${c.polylineId}` : (c.cornerId ? `${c.snapType} #${c.cornerId}` : (c.lineId ? `${c.snapType} #${c.lineId}` : c.snapType))))));
   const tag=c.snapped?`<span style="color:var(--green);font-size:10px"> ✓ ${snapName}</span>`:`<span style="color:var(--muted);font-size:10px"> (voľný bod)</span>`;
   el.innerHTML=`<div class="ci-label">SÚRADNICE${tag}</div>
     <div class="ci-row"><span class="ci-key">Y:</span><span class="ci-val">${c.x.toFixed(3)}</span></div>
     <div class="ci-row"><span class="ci-key">X:</span><span class="ci-val">${c.y.toFixed(3)}</span></div>
-    <div class="ci-row"><span class="ci-key">Z:</span><span class="ci-val">${(c.z||0).toFixed(3)}</span></div>`;
+    <div class="ci-row"><span class="ci-key">Z:</span><span class="ci-val">${(c.z||0).toFixed(3)}</span></div>
+    <div class="ci-empty" style="margin-top:7px">Stlač hore „Navigovať“ pre vedenie na tento bod.</div>`;
+  updateNavigationButton();
 }
 
 function addRecordedCoord(c) {
@@ -2468,7 +2722,9 @@ function downloadRecordedCoords() {
 
 function processFile(file) {
   if (!file.name.toLowerCase().endsWith('.dxf')) { showError('Nahraj .dxf súbor.'); return; }
+  stopNavigation();
   entities=[]; points=[]; clickedCoords=null; highlightedPt=-1; hoverSnap=null;
+  updateNavigationButton();
   measureMode=false; measurePoints=[];
   searchResults=[]; searchIndex=-1; searchHighlight=null;
   recordedCoords=[]; recordMode=false;
