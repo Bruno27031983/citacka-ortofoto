@@ -1327,7 +1327,6 @@ function startLiveLocation() {
         bounds={minX:p.x-25,maxX:p.x+25,minY:p.y-25,maxY:p.y+25};
         focusWorldPoint(p.x,p.y,Math.max(viewScale,8));
         locationFirstFix=false;
-        if (isJtskMetersDrawing()) setOrtoEnabled(true);
       }
       const acc=liveLocation.accuracy ? ` ±${Math.round(liveLocation.accuracy)} m` : '';
       updateLocationStatus(`Moja poloha${acc}`,'success');
