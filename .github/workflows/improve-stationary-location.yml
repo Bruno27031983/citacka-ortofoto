@@ -173,3 +173,5 @@ function stabilizeLocationFix(position) {
           git add index.html
           git commit -m "Spresnit polohu pri stati"
           git push
+
+# opakovane spustenie nasadenia
