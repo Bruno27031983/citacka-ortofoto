@@ -26,103 +26,103 @@ jobs:
 
           old_vars = "let liveLocation=null, locationWatchId=null, locationFirstFix=true;\n"
           new_vars = """let liveLocation=null, locationWatchId=null, locationFirstFix=true;
-let stationarySamples=[], rawLocationHistory=[];
-const STATIONARY_WINDOW_MS=25000;
-const STATIONARY_MAX_ACCURACY=35;
-"""
+          let stationarySamples=[], rawLocationHistory=[];
+          const STATIONARY_WINDOW_MS=25000;
+          const STATIONARY_MAX_ACCURACY=35;
+          """
           if old_vars not in text:
               raise SystemExit('Nenasiel sa blok premennych polohy')
           text = text.replace(old_vars, new_vars, 1)
 
           marker = "function startLiveLocation() {\n"
           helper = r"""// Stabilizácia pri státí: priemeruje iba čerstvé a zhluknuté merania.
-function resetStationaryLocationFilter() {
-  stationarySamples=[];
-  rawLocationHistory=[];
-}
+          function resetStationaryLocationFilter() {
+            stationarySamples=[];
+            rawLocationHistory=[];
+          }
 
-function medianNumber(values) {
-  if (!values.length) return 0;
-  const sorted=[...values].sort((a,b)=>a-b);
-  const middle=Math.floor(sorted.length/2);
-  return sorted.length%2 ? sorted[middle] : (sorted[middle-1]+sorted[middle])/2;
-}
+          function medianNumber(values) {
+            if (!values.length) return 0;
+            const sorted=[...values].sort((a,b)=>a-b);
+            const middle=Math.floor(sorted.length/2);
+            return sorted.length%2 ? sorted[middle] : (sorted[middle-1]+sorted[middle])/2;
+          }
 
-function stabilizeLocationFix(position) {
-  const source={id:'moja-poloha',lat:position.coords.latitude,lon:position.coords.longitude};
-  const p=gpsToJtsk(source);
-  const accuracy=Number.isFinite(position.coords.accuracy)?position.coords.accuracy:0;
-  const speed=Number.isFinite(position.coords.speed)?position.coords.speed:null;
-  const timestamp=Number.isFinite(position.timestamp)?position.timestamp:Date.now();
-  const raw={
-    ...p,
-    lat:source.lat,
-    lon:source.lon,
-    accuracy,
-    heading:Number.isFinite(position.coords.heading)?position.coords.heading:null,
-    speed,
-    timestamp,
-    stabilized:false,
-    sampleCount:1,
-    stability:null
-  };
+          function stabilizeLocationFix(position) {
+            const source={id:'moja-poloha',lat:position.coords.latitude,lon:position.coords.longitude};
+            const p=gpsToJtsk(source);
+            const accuracy=Number.isFinite(position.coords.accuracy)?position.coords.accuracy:0;
+            const speed=Number.isFinite(position.coords.speed)?position.coords.speed:null;
+            const timestamp=Number.isFinite(position.timestamp)?position.timestamp:Date.now();
+            const raw={
+              ...p,
+              lat:source.lat,
+              lon:source.lon,
+              accuracy,
+              heading:Number.isFinite(position.coords.heading)?position.coords.heading:null,
+              speed,
+              timestamp,
+              stabilized:false,
+              sampleCount:1,
+              stability:null
+            };
 
-  rawLocationHistory.push(raw);
-  rawLocationHistory=rawLocationHistory.filter(item=>timestamp-item.timestamp<=10000).slice(-12);
+            rawLocationHistory.push(raw);
+            rawLocationHistory=rawLocationHistory.filter(item=>timestamp-item.timestamp<=10000).slice(-12);
 
-  let inferredMoving=false;
-  if (rawLocationHistory.length>=3) {
-    const first=rawLocationHistory[0];
-    const seconds=(timestamp-first.timestamp)/1000;
-    const distance=Math.hypot(raw.x-first.x,raw.y-first.y);
-    const tolerance=Math.max(5,Math.min(14,((raw.accuracy||8)+(first.accuracy||8))*0.65));
-    inferredMoving=seconds>=3 && distance>tolerance && distance/seconds>0.8;
-  }
-  const moving=(Number.isFinite(speed) && speed>0.7) || inferredMoving;
-  if (moving) {
-    stationarySamples=[];
-    return raw;
-  }
+            let inferredMoving=false;
+            if (rawLocationHistory.length>=3) {
+              const first=rawLocationHistory[0];
+              const seconds=(timestamp-first.timestamp)/1000;
+              const distance=Math.hypot(raw.x-first.x,raw.y-first.y);
+              const tolerance=Math.max(5,Math.min(14,((raw.accuracy||8)+(first.accuracy||8))*0.65));
+              inferredMoving=seconds>=3 && distance>tolerance && distance/seconds>0.8;
+            }
+            const moving=(Number.isFinite(speed) && speed>0.7) || inferredMoving;
+            if (moving) {
+              stationarySamples=[];
+              return raw;
+            }
 
-  if (!accuracy || accuracy<=STATIONARY_MAX_ACCURACY) stationarySamples.push(raw);
-  stationarySamples=stationarySamples
-    .filter(item=>timestamp-item.timestamp<=STATIONARY_WINDOW_MS)
-    .slice(-30);
+            if (!accuracy || accuracy<=STATIONARY_MAX_ACCURACY) stationarySamples.push(raw);
+            stationarySamples=stationarySamples
+              .filter(item=>timestamp-item.timestamp<=STATIONARY_WINDOW_MS)
+              .slice(-30);
 
-  if (stationarySamples.length<3) return raw;
+            if (stationarySamples.length<3) return raw;
 
-  const medianX=medianNumber(stationarySamples.map(item=>item.x));
-  const medianY=medianNumber(stationarySamples.map(item=>item.y));
-  const medianAccuracy=medianNumber(stationarySamples.map(item=>item.accuracy||10));
-  const clusterRadius=Math.max(3,Math.min(15,medianAccuracy*1.6));
-  let cluster=stationarySamples.filter(item=>Math.hypot(item.x-medianX,item.y-medianY)<=clusterRadius);
-  if (cluster.length<3) cluster=stationarySamples.slice(-3);
+            const medianX=medianNumber(stationarySamples.map(item=>item.x));
+            const medianY=medianNumber(stationarySamples.map(item=>item.y));
+            const medianAccuracy=medianNumber(stationarySamples.map(item=>item.accuracy||10));
+            const clusterRadius=Math.max(3,Math.min(15,medianAccuracy*1.6));
+            let cluster=stationarySamples.filter(item=>Math.hypot(item.x-medianX,item.y-medianY)<=clusterRadius);
+            if (cluster.length<3) cluster=stationarySamples.slice(-3);
 
-  let sumW=0, sumX=0, sumY=0;
-  for (const item of cluster) {
-    const effectiveAccuracy=Math.max(item.accuracy||10,3);
-    const weight=1/(effectiveAccuracy*effectiveAccuracy);
-    sumW+=weight;
-    sumX+=item.x*weight;
-    sumY+=item.y*weight;
-  }
-  const x=sumX/sumW;
-  const y=sumY/sumW;
-  const spread=Math.sqrt(cluster.reduce((sum,item)=>sum+Math.hypot(item.x-x,item.y-y)**2,0)/cluster.length);
-  const bestAccuracy=Math.min(...cluster.map(item=>item.accuracy||STATIONARY_MAX_ACCURACY));
+            let sumW=0, sumX=0, sumY=0;
+            for (const item of cluster) {
+              const effectiveAccuracy=Math.max(item.accuracy||10,3);
+              const weight=1/(effectiveAccuracy*effectiveAccuracy);
+              sumW+=weight;
+              sumX+=item.x*weight;
+              sumY+=item.y*weight;
+            }
+            const x=sumX/sumW;
+            const y=sumY/sumW;
+            const spread=Math.sqrt(cluster.reduce((sum,item)=>sum+Math.hypot(item.x-x,item.y-y)**2,0)/cluster.length);
+            const bestAccuracy=Math.min(...cluster.map(item=>item.accuracy||STATIONARY_MAX_ACCURACY));
 
-  return {
-    ...raw,
-    x,
-    y,
-    accuracy:bestAccuracy,
-    stabilized:cluster.length>=5,
-    sampleCount:cluster.length,
-    stability:spread
-  };
-}
+            return {
+              ...raw,
+              x,
+              y,
+              accuracy:bestAccuracy,
+              stabilized:cluster.length>=5,
+              sampleCount:cluster.length,
+              stability:spread
+            };
+          }
 
-"""
+          """
           if marker not in text:
               raise SystemExit('Nenasiel sa zaciatok startLiveLocation')
           text = text.replace(marker, helper + marker, 1)
@@ -134,33 +134,33 @@ function stabilizeLocationFix(position) {
           text = text.replace(old_stop, new_stop, 1)
 
           old_fix = """      const source={id:'moja-poloha',lat:position.coords.latitude,lon:position.coords.longitude};
-      const p=gpsToJtsk(source);
-      liveLocation={
-        ...p,
-        accuracy:Number.isFinite(position.coords.accuracy)?position.coords.accuracy:0,
-        heading:Number.isFinite(position.coords.heading)?position.coords.heading:null,
-        speed:Number.isFinite(position.coords.speed)?position.coords.speed:null,
-        timestamp:position.timestamp
-      };
-"""
+                const p=gpsToJtsk(source);
+                liveLocation={
+                  ...p,
+                  accuracy:Number.isFinite(position.coords.accuracy)?position.coords.accuracy:0,
+                  heading:Number.isFinite(position.coords.heading)?position.coords.heading:null,
+                  speed:Number.isFinite(position.coords.speed)?position.coords.speed:null,
+                  timestamp:position.timestamp
+                };
+          """
           new_fix = """      liveLocation=stabilizeLocationFix(position);
-      const p=liveLocation;
-"""
+                const p=liveLocation;
+          """
           if old_fix not in text:
               raise SystemExit('Nenasiel sa povodny blok spracovania GPS')
           text = text.replace(old_fix, new_fix, 1)
 
           old_status = """      const acc=liveLocation.accuracy ? ` ±${Math.round(liveLocation.accuracy)} m` : '';
-      updateLocationStatus(`Moja poloha${acc}`,'success');
-"""
+                updateLocationStatus(`Moja poloha${acc}`,'success');
+          """
           new_status = """      const acc=liveLocation.accuracy ? ` ±${Math.round(liveLocation.accuracy)} m` : '';
-      const stabilization=liveLocation.sampleCount>=3
-        ? (liveLocation.stabilized
+                const stabilization=liveLocation.sampleCount>=3
+                  ? (liveLocation.stabilized
           ? ` · stabilná z ${liveLocation.sampleCount} meraní`
           : ` · stabilizujem ${liveLocation.sampleCount}/5`)
-        : '';
-      updateLocationStatus(`Moja poloha${acc}${stabilization}`,'success');
-"""
+                  : '';
+                updateLocationStatus(`Moja poloha${acc}${stabilization}`,'success');
+          """
           if old_status not in text:
               raise SystemExit('Nenasiel sa stavovy text polohy')
           text = text.replace(old_status, new_status, 1)
