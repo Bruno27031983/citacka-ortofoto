@@ -494,6 +494,10 @@ canvas { display: block; cursor: crosshair; position: absolute; top: 0; left: 0;
 
 /* Panel navigácie je zámerne skrytý, navigácia zostáva aktívna. */
 .navigation-panel, .navigation-panel.visible { display: none !important; }
+.gps-quality { position:absolute; left:10px; bottom:48px; z-index:15; max-width:calc(100% - 20px); padding:7px 10px; border:2px solid currentColor; border-radius:8px; background:rgba(255,255,255,.96); font-size:12px; color:#64748b; pointer-events:none; }
+.gps-quality[data-quality="good"] { color:#0f766e; }
+.gps-quality[data-quality="weak"] { color:#92400e; }
+.gps-quality[data-quality="stale"] { color:#b91c1c; }
 </style>
 </head>
 <body>
@@ -579,6 +583,7 @@ canvas { display: block; cursor: crosshair; position: absolute; top: 0; left: 0;
   <div class="canvas-area" id="canvasArea">
     <button class="panel-toggle" id="btnPanelToggle" title="Skryť/zobraziť panel">☰</button>
     <div class="location-status" id="locationStatus"></div>
+    <div class="gps-quality" id="gpsQuality" hidden></div>
     <div class="navigation-panel" id="navigationPanel">
       <div class="nav-arrow" id="navArrow">↑</div>
       <div class="nav-details">
@@ -1273,6 +1278,27 @@ function downloadGpsPoints() {
 }
 
 
+// UI thresholds: good up to 10 m; stale after 15 s or when tracking stops.
+function gpsQualityState(fix, tracking, now=Date.now()) {
+  if (!fix) return null;
+  const age=Number.isFinite(fix.timestamp) ? Math.max(0,Math.floor((now-fix.timestamp)/1000)) : null;
+  const stale=!tracking || age===null || age>=15;
+  const good=Number.isFinite(fix.accuracy) && fix.accuracy>0 && fix.accuracy<=10;
+  return {age,quality:stale?'stale':good?'good':'weak'};
+}
+function updateGpsQuality() {
+  const el=document.getElementById('gpsQuality');
+  const state=gpsQualityState(liveLocation,locationWatchId!==null);
+  el.hidden=!state;
+  if (!state) return;
+  el.dataset.quality=state.quality;
+  const label=state.quality==='good'?'Dobrá poloha':state.quality==='weak'?'Slabá presnosť':'Neaktuálna poloha';
+  const accuracy=liveLocation.accuracy>0 ? '±'+Math.round(liveLocation.accuracy)+' m' : 'presnosť neznáma';
+  const age=state.age===null ? 'vek neznámy' : state.age<60 ? state.age+' s' : Math.floor(state.age/60)+' min '+state.age%60+' s';
+  el.textContent=label+' · '+accuracy+' · meranie pred '+age+(locationWatchId===null?' · GPS vypnuté':'');
+  el.title='Dobrá poloha: odhad presnosti do 10 m. Neaktuálna: meranie staré aspoň 15 s alebo vypnuté GPS.';
+}
+
 function updateLocationStatus(message='',type='') {
   const el=document.getElementById('locationStatus');
   if (!message) {
@@ -1297,6 +1323,7 @@ function locationErrorMessage(error) {
 function stopLiveLocation(showMessage=true) {
   if (locationWatchId!==null && navigator.geolocation) navigator.geolocation.clearWatch(locationWatchId);
   locationWatchId=null;
+  updateGpsQuality();
   locationFirstFix=true;
   resetStationaryLocationFilter();
   const btn=document.getElementById('btnLocation');
@@ -1413,6 +1440,7 @@ function startLiveLocation() {
   locationWatchId=navigator.geolocation.watchPosition(position=>{
     try {
       liveLocation=stabilizeLocationFix(position);
+      updateGpsQuality();
       const p=liveLocation;
       recomputeMapBounds();
       document.getElementById('btnOrto').disabled=!isJtskMetersDrawing();
@@ -2912,6 +2940,8 @@ document.getElementById('fileInput').addEventListener('click',e=>{e.target.value
 document.getElementById('fileInput').addEventListener('change',e=>{if(e.target.files[0])processFile(e.target.files[0]);});
 
 resizeCanvas(); initEvents(); restoreRecordedCoords();
+setInterval(updateGpsQuality,1000);
+document.addEventListener('visibilitychange',updateGpsQuality);
 window.addEventListener('resize',()=>{resizeCanvas();if(hasMapContent()){draw();}});
 window.addEventListener('beforeunload',()=>{if(locationWatchId!==null)navigator.geolocation.clearWatch(locationWatchId);});
 </script>
